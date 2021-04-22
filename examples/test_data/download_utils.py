@@ -24,13 +24,13 @@
 # IN THE SOFTWARE.
 # ----------------------------------------------------------------------------
 
-from pathlib import Path
-import urllib.request
 import concurrent.futures
-import json
 import hashlib
 import io
+import json
 import time
+import urllib.request
+from pathlib import Path
 
 # Typically "Open3D/examples/test_data", the test data dir.
 _test_data_dir = Path(__file__).parent.absolute().resolve()
