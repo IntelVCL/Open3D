@@ -27,6 +27,7 @@
 #include <math.h>
 
 #include <cub/cub.cuh>
+#include <moderngpu/kernel_segsort.hxx>
 
 #include "open3d/core/nns/FixedRadiusSearch.h"
 #include "open3d/core/nns/MemoryAllocation.h"
@@ -75,6 +76,42 @@ inline __device__ bool NeighborTest(const Vec3<T>& p1,
     }
     result = *dist <= threshold;
     return result;
+}
+
+template <class T>
+inline __device__ void swap(T* x, T* y) {
+    T tmp = *x;
+    *x = *y;
+    *y = tmp;
+}
+
+template <class T>
+inline __device__ void heapify(T* dist, int64_t* idx, int index, int k) {
+    int root = index;
+    int child = root * 2 + 1;
+
+    while (child < k) {
+        if (child + 1 < k && dist[child + 1] > dist[child]) {
+            child++;
+        }
+        if (dist[root] > dist[child]) {
+            return;
+        }
+        swap<T>(&dist[root], &dist[child]);
+        swap<int64_t>(&idx[root], &idx[child]);
+        root = child;
+        child = root * 2 + 1;
+    }
+}
+
+template <class T>
+__device__ void heap_sort(T* dist, int64_t* idx, int k) {
+    int i;
+    for (i = k - 1; i > 0; i--) {
+        swap<T>(&dist[0], &dist[i]);
+        swap<int64_t>(&idx[0], &idx[i]);
+        heapify(dist, idx, 0, i);
+    }
 }
 
 /// Kernel for CountHashTableEntries
@@ -127,6 +164,45 @@ void CountHashTableEntries(const cudaStream_t& stream,
                 num_points);
 }
 
+template <class T>
+__global__ void SortDatasetPointKernel(int64_t* __restrict__ hash_table_index,
+                                       const T* const __restrict__ points,
+                                       T* __restrict__ sorted_points,
+                                       int64_t* __restrict__ sorted_indices,
+                                       const size_t points_start_idx,
+                                       const size_t points_end_idx) {
+    const int idx = blockDim.x * blockIdx.x + threadIdx.x + points_start_idx;
+    if (idx >= points_end_idx) return;
+
+    int idx_sorted = sorted_indices[idx] = hash_table_index[idx];
+    idx_sorted += points_start_idx;
+
+    sorted_points[idx * 3] = points[idx_sorted * 3];
+    sorted_points[idx * 3 + 1] = points[idx_sorted * 3 + 1];
+    sorted_points[idx * 3 + 2] = points[idx_sorted * 3 + 2];
+    hash_table_index[idx] = idx - points_start_idx;
+}
+
+template <class T>
+void SortDatasetPoint(const cudaStream_t& stream,
+                      int64_t* hash_table_index,
+                      const T* const points,
+                      T* sorted_points,
+                      int64_t* sorted_point_indices,
+                      const size_t points_start_idx,
+                      const size_t points_end_idx) {
+    size_t num_points = points_end_idx - points_start_idx;
+
+    const int BLOCKSIZE = 128;
+    dim3 block(BLOCKSIZE, 1, 1);
+    dim3 grid(0, 1, 1);
+    grid.x = utility::DivUp(num_points, block.x);
+
+    if (grid.x)
+        SortDatasetPointKernel<T><<<grid, block, 0, stream>>>(
+                hash_table_index, points, sorted_points, sorted_point_indices,
+                points_start_idx, points_end_idx);
+}
 /// Kernel for ComputePointIndexTable
 template <class T>
 __global__ void ComputePointIndexTableKernel(
@@ -347,6 +423,7 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
         int64_t* __restrict__ indices,
         T* __restrict__ distances,
         const int64_t* const __restrict__ neighbors_row_splits,
+        const int64_t* const __restrict__ point_indices,
         const int64_t* const __restrict__ point_index_table,
         const int64_t* const __restrict__ hash_table_cell_splits,
         size_t hash_table_size,
@@ -359,8 +436,6 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
         const T threshold) {
     int query_idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (query_idx >= num_queries) return;
-
-    int count = 0;  // counts the number of neighbors for this query point
 
     size_t indices_offset = neighbors_row_splits[query_idx];
 
@@ -392,6 +467,7 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
         }
     }
 
+    int count = 0;  // counts the number of neighbors for this query point
     for (int bin_i = 0; bin_i < 8; ++bin_i) {
         int bin = bins_to_visit[bin_i];
         if (bin == -1) break;
@@ -401,15 +477,13 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
 
         for (size_t j = begin_idx; j < end_idx; ++j) {
             int64_t idx = point_index_table[j];
-
             Vec3<T> p(&points[idx * 3 + 0]);
 
             T dist;
             if (NeighborTest<METRIC>(p, query_pos, &dist, threshold)) {
-                indices[indices_offset + count] = idx;
-                if (RETURN_DISTANCES) {
-                    distances[indices_offset + count] = dist;
-                }
+                int64_t sorted_idx = point_indices[idx];
+                distances[indices_offset + count] = dist;
+                indices[indices_offset + count] = sorted_idx;
                 ++count;
             }
         }
@@ -465,6 +539,7 @@ void WriteNeighborsIndicesAndDistances(
         int64_t* indices,
         T* distances,
         const int64_t* const neighbors_row_splits,
+        const int64_t* const point_indices,
         const int64_t* const point_index_table,
         const int64_t* const hash_table_cell_splits,
         size_t hash_table_cell_splits_size,
@@ -484,11 +559,11 @@ void WriteNeighborsIndicesAndDistances(
     grid.x = utility::DivUp(num_queries, block.x);
 
     if (grid.x) {
-#define FN_PARAMETERS                                                      \
-    indices, distances, neighbors_row_splits, point_index_table,           \
-            hash_table_cell_splits, hash_table_cell_splits_size - 1,       \
-            query_points, num_queries, points, num_points, inv_voxel_size, \
-            radius, threshold
+#define FN_PARAMETERS                                                   \
+    indices, distances, neighbors_row_splits, point_indices,            \
+            point_index_table, hash_table_cell_splits,                  \
+            hash_table_cell_splits_size - 1, query_points, num_queries, \
+            points, num_points, inv_voxel_size, radius, threshold
 
 #define CALL_TEMPLATE(METRIC, RETURN_DISTANCES)                              \
     if (METRIC == metric && RETURN_DISTANCES == return_distances) {          \
@@ -519,6 +594,7 @@ template <class T, int METRIC, bool RETURN_DISTANCES>
 __global__ void WriteNeighborsHybridKernel(
         int64_t* __restrict__ indices,
         T* __restrict__ distances,
+        const int64_t* const __restrict__ point_indices,
         const int64_t* const __restrict__ point_index_table,
         const int64_t* const __restrict__ hash_table_cell_splits,
         size_t hash_table_size,
@@ -533,9 +609,10 @@ __global__ void WriteNeighborsHybridKernel(
     int query_idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (query_idx >= num_queries) return;
 
-    int count = 0;  // counts the number of neighbors for this query point
-
     size_t indices_offset = max_knn * query_idx;
+    extern __shared__ __align__(sizeof(T)) unsigned char _shared_mem[];
+    T* distance_thread =
+            reinterpret_cast<T*>(_shared_mem) + max_knn * threadIdx.x;
 
     Vec3<T> query_pos(query_points[query_idx * 3 + 0],
                       query_points[query_idx * 3 + 1],
@@ -567,7 +644,7 @@ __global__ void WriteNeighborsHybridKernel(
 
     int max_index;
     T max_value;
-
+    int count = 0;  // counts the number of neighbors for this query point
     for (int bin_i = 0; bin_i < 8; ++bin_i) {
         int bin = bins_to_visit[bin_i];
         if (bin == -1) break;
@@ -582,10 +659,11 @@ __global__ void WriteNeighborsHybridKernel(
 
             T dist;
             if (NeighborTest<METRIC>(p, query_pos, &dist, threshold)) {
+                int64_t sorted_idx = point_indices[idx];
                 // If count if less than max_knn, record idx and dist.
                 if (count < max_knn) {
-                    indices[indices_offset + count] = idx;
-                    distances[indices_offset + count] = dist;
+                    indices[indices_offset + count] = sorted_idx;
+                    distance_thread[count] = dist;
                     // Update max_index and max_value.
                     if (count == 0 || max_value < dist) {
                         max_index = count;
@@ -597,15 +675,15 @@ __global__ void WriteNeighborsHybridKernel(
                     // If dist is smaller than current max_value.
                     if (max_value > dist) {
                         // Replace idx and dist at current max_index.
-                        indices[indices_offset + max_index] = idx;
-                        distances[indices_offset + max_index] = dist;
+                        indices[indices_offset + max_index] = sorted_idx;
+                        distance_thread[max_index] = dist;
                         // Update max_value
                         max_value = dist;
                         // Find max_index.
                         for (auto k = 0; k < max_knn; ++k) {
-                            if (distances[indices_offset + k] > max_value) {
+                            if (distance_thread[k] > max_value) {
                                 max_index = k;
-                                max_value = distances[indices_offset + k];
+                                max_value = distance_thread[k];
                             }
                         }
                     }
@@ -613,19 +691,17 @@ __global__ void WriteNeighborsHybridKernel(
             }
         }
     }
-    // bubble sort
-    for (int i = 0; i < count - 1; ++i) {
-        for (int j = 0; j < count - i - 1; ++j) {
-            if (distances[indices_offset + j] >
-                distances[indices_offset + j + 1]) {
-                T dist_tmp = distances[indices_offset + j];
-                int64_t ind_tmp = indices[indices_offset + j];
-                distances[indices_offset + j] =
-                        distances[indices_offset + j + 1];
-                indices[indices_offset + j] = indices[indices_offset + j + 1];
-                distances[indices_offset + j + 1] = dist_tmp;
-                indices[indices_offset + j + 1] = ind_tmp;
-            }
+    // heap sort
+    for (int i = (count / 2) - 1; i > -1; i--) {
+        heapify(distance_thread, indices + indices_offset, i, count);
+    }
+    heap_sort(distance_thread, indices + indices_offset, count);
+    for (auto i = 0; i < max_knn; ++i) {
+        if (i < count) {
+            distances[indices_offset + i] = distance_thread[i];
+        } else {
+            distances[indices_offset + i] = 0;
+            indices[indices_offset + i] = -1;
         }
     }
 }
@@ -673,6 +749,7 @@ template <class T>
 void WriteNeighborsHybrid(const cudaStream_t& stream,
                           int64_t* indices,
                           T* distances,
+                          const int64_t* const point_indices,
                           const int64_t* const point_index_table,
                           const int64_t* const hash_table_cell_splits,
                           size_t hash_table_cell_splits_size,
@@ -687,21 +764,23 @@ void WriteNeighborsHybrid(const cudaStream_t& stream,
                           const bool return_distances) {
     const T threshold = (metric == L2 ? radius * radius : radius);
 
-    const int BLOCKSIZE = 64;
+    const int BLOCKSIZE = 32;
     dim3 block(BLOCKSIZE, 1, 1);
     dim3 grid(0, 1, 1);
     grid.x = utility::DivUp(num_queries, block.x);
 
     if (grid.x) {
-#define FN_PARAMETERS                                                   \
-    indices, distances, point_index_table, hash_table_cell_splits,      \
-            hash_table_cell_splits_size - 1, query_points, num_queries, \
-            points, num_points, inv_voxel_size, radius, threshold, max_knn
+#define FN_PARAMETERS                                                      \
+    indices, distances, point_indices, point_index_table,                  \
+            hash_table_cell_splits, hash_table_cell_splits_size - 1,       \
+            query_points, num_queries, points, num_points, inv_voxel_size, \
+            radius, threshold, max_knn
 
-#define CALL_TEMPLATE(METRIC, RETURN_DISTANCES)                     \
-    if (METRIC == metric && RETURN_DISTANCES == return_distances) { \
-        WriteNeighborsHybridKernel<T, METRIC, RETURN_DISTANCES>     \
-                <<<grid, block, 0, stream>>>(FN_PARAMETERS);        \
+#define CALL_TEMPLATE(METRIC, RETURN_DISTANCES)                             \
+    if (METRIC == metric && RETURN_DISTANCES == return_distances) {         \
+        WriteNeighborsHybridKernel<T, METRIC, RETURN_DISTANCES>             \
+                <<<grid, block, BLOCKSIZE * max_knn * sizeof(T), stream>>>( \
+                        FN_PARAMETERS);                                     \
     }
 
 #define CALL_TEMPLATE2(METRIC)  \
@@ -735,7 +814,9 @@ void BuildSpatialHashTableCUDA(void* temp,
                                const int64_t* hash_table_splits,
                                const size_t hash_table_cell_splits_size,
                                int64_t* hash_table_cell_splits,
-                               int64_t* hash_table_index) {
+                               int64_t* hash_table_index,
+                               int64_t* sorted_point_indices,
+                               T* sorted_points) {
     const bool get_temp_size = !temp;
     const cudaStream_t stream = 0;
     int texture_alignment = 512;
@@ -807,6 +888,9 @@ void BuildSpatialHashTableCUDA(void* temp,
                                    hash_table_cell_splits + first_cell_idx,
                                    hash_table_size + 1, inv_voxel_size, points,
                                    points_start_idx, points_end_idx);
+            SortDatasetPoint(stream, hash_table_index, points, sorted_points,
+                             sorted_point_indices, points_start_idx,
+                             points_end_idx);
         }
     }
 
@@ -820,48 +904,16 @@ void BuildSpatialHashTableCUDA(void* temp,
 }
 
 template <class T>
-void SortPairs(void* temp,
-               size_t& temp_size,
-               int64_t num_indices,
+void SortPairs(int64_t num_indices,
                int64_t num_segments,
                const int64_t* query_neighbors_row_splits,
-               int64_t* indices_unsorted,
-               T* distances_unsorted,
-               int64_t* indices_sorted,
-               T* distances_sorted) {
-    const bool get_temp_size = !temp;
-    int texture_alignment = 512;
+               int64_t* indices,
+               T* distances) {
+    mgpu::standard_context_t context(/*print_prop*/ false);
 
-    if (get_temp_size) {
-        temp = (char*)1;  // worst case pointer alignment
-        temp_size = std::numeric_limits<int64_t>::max();
-    }
-
-    MemoryAllocation mem_temp(temp, temp_size, texture_alignment);
-
-    std::pair<void*, size_t> sort_temp(nullptr, 0);
-
-    cub::DeviceSegmentedRadixSort::SortPairs(
-            sort_temp.first, sort_temp.second, distances_unsorted,
-            distances_sorted, indices_unsorted, indices_sorted, num_indices,
-            num_segments, query_neighbors_row_splits,
-            query_neighbors_row_splits + 1);
-    sort_temp = mem_temp.Alloc(sort_temp.second);
-
-    if (!get_temp_size) {
-        cub::DeviceSegmentedRadixSort::SortPairs(
-                sort_temp.first, sort_temp.second, distances_unsorted,
-                distances_sorted, indices_unsorted, indices_sorted, num_indices,
-                num_segments, query_neighbors_row_splits,
-                query_neighbors_row_splits + 1);
-    }
-    mem_temp.Free(sort_temp);
-
-    if (get_temp_size) {
-        // return the memory peak as the required temporary memory size.
-        temp_size = mem_temp.MaxUsed();
-        return;
-    }
+    mgpu::segmented_sort(distances, indices, num_indices,
+                         query_neighbors_row_splits + 1, num_segments,
+                         mgpu::less_t<T>(), context);
 }
 
 template <class T>
@@ -870,6 +922,7 @@ void FixedRadiusSearchCUDA(void* temp,
                            int64_t* query_neighbors_row_splits,
                            size_t num_points,
                            const T* const points,
+                           const int64_t* const point_indices,
                            size_t num_queries,
                            const T* const queries,
                            const T radius,
@@ -979,7 +1032,8 @@ void FixedRadiusSearchCUDA(void* temp,
         T* distances_ptr;
 
         output_allocator.AllocIndices(&indices_ptr, num_indices);
-        output_allocator.AllocDistances(&distances_ptr, num_indices);
+        output_allocator.AllocDistances(&distances_ptr, num_indices,
+                                        std::numeric_limits<T>::max());
         for (int i = 0; i < batch_size; ++i) {
             const size_t hash_table_size =
                     hash_table_splits[i + 1] - hash_table_splits[i];
@@ -991,7 +1045,8 @@ void FixedRadiusSearchCUDA(void* temp,
             WriteNeighborsIndicesAndDistances(
                     stream, indices_ptr, distances_ptr,
                     query_neighbors_row_splits + queries_row_splits[i],
-                    hash_table_index, hash_table_cell_splits + first_cell_idx,
+                    point_indices, hash_table_index,
+                    hash_table_cell_splits + first_cell_idx,
                     hash_table_size + 1, queries_i, num_queries_i, points,
                     num_points, inv_voxel_size, radius, metric, true);
         }
@@ -1002,6 +1057,7 @@ void FixedRadiusSearchCUDA(void* temp,
 template <class T>
 void HybridSearchCUDA(size_t num_points,
                       const T* const points,
+                      const int64_t* const point_indices,
                       size_t num_queries,
                       const T* const queries,
                       const T radius,
@@ -1051,10 +1107,10 @@ void HybridSearchCUDA(size_t num_points,
                 queries_row_splits[i + 1] - queries_row_splits[i];
 
         WriteNeighborsHybrid(
-                stream, indices_ptr, distances_ptr, hash_table_index,
-                hash_table_cell_splits + first_cell_idx, hash_table_size + 1,
-                queries_i, num_queries_i, points, num_points, inv_voxel_size,
-                radius, max_knn, metric, true);
+                stream, indices_ptr, distances_ptr, point_indices,
+                hash_table_index, hash_table_cell_splits + first_cell_idx,
+                hash_table_size + 1, queries_i, num_queries_i, points,
+                num_points, inv_voxel_size, radius, max_knn, metric, true);
     }
 }
 ////
@@ -1070,7 +1126,9 @@ template void BuildSpatialHashTableCUDA(
         const int64_t* hash_table_splits,
         const size_t hash_table_cell_splits_size,
         int64_t* hash_table_cell_splits,
-        int64_t* hash_table_index);
+        int64_t* hash_table_index,
+        int64_t* sorted_point_indices,
+        float* sorted_points);
 
 template void BuildSpatialHashTableCUDA(
         void* temp,
@@ -1083,27 +1141,21 @@ template void BuildSpatialHashTableCUDA(
         const int64_t* hash_table_splits,
         const size_t hash_table_cell_splits_size,
         int64_t* hash_table_cell_splits,
-        int64_t* hash_table_index);
+        int64_t* hash_table_index,
+        int64_t* sorted_point_indices,
+        double* sorted_points);
 
-template void SortPairs(void* temp,
-                        size_t& temp_size,
-                        int64_t num_indices,
+template void SortPairs(int64_t num_indices,
                         int64_t num_segments,
                         const int64_t* query_neighbors_row_splits,
-                        int64_t* indices_unsorted,
-                        float* distances_unsorted,
-                        int64_t* indices_sorted,
-                        float* distances_sorted);
+                        int64_t* indices,
+                        float* distances);
 
-template void SortPairs(void* temp,
-                        size_t& temp_size,
-                        int64_t num_indices,
+template void SortPairs(int64_t num_indices,
                         int64_t num_segments,
                         const int64_t* query_neighbors_row_splits,
-                        int64_t* indices_unsorted,
-                        double* distances_unsorted,
-                        int64_t* indices_sorted,
-                        double* distances_sorted);
+                        int64_t* indices,
+                        double* distances);
 
 template void FixedRadiusSearchCUDA(
         void* temp,
@@ -1111,6 +1163,7 @@ template void FixedRadiusSearchCUDA(
         int64_t* query_neighbors_row_splits,
         size_t num_points,
         const float* const points,
+        const int64_t* const point_indices,
         size_t num_queries,
         const float* const queries,
         const float radius,
@@ -1130,6 +1183,7 @@ template void FixedRadiusSearchCUDA(
         int64_t* query_neighbors_row_splits,
         size_t num_points,
         const double* const points,
+        const int64_t* const point_indices,
         size_t num_queries,
         const double* const queries,
         const double radius,
@@ -1146,6 +1200,7 @@ template void FixedRadiusSearchCUDA(
 template void HybridSearchCUDA(
         size_t num_points,
         const float* const points,
+        const int64_t* const point_indices,
         size_t num_queries,
         const float* const queries,
         const float radius,
@@ -1163,6 +1218,7 @@ template void HybridSearchCUDA(
 template void HybridSearchCUDA(
         size_t num_points,
         const double* const points,
+        const int64_t* const point_indices,
         size_t num_queries,
         const double* const queries,
         const double radius,
