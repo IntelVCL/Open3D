@@ -503,6 +503,8 @@ void pybind_rendering_classes(py::module &m) {
             .def("set_sun_light", &Scene::SetSunLight,
                  "Sets the parameters of the sun light: direction, "
                  "color, intensity")
+            .def("set_sun_light_direction", &Scene::SetSunLightDirection,
+                 "Sets the sunlight direction.")
             .def("add_point_light", &Scene::AddPointLight,
                  "Adds a point light to the scene: add_point_light(name, "
                  "color, position, intensity, falloff, cast_shadows)")
@@ -551,12 +553,19 @@ void pybind_rendering_classes(py::module &m) {
     py::enum_<Open3DScene::LightingProfile> lighting(
             o3dscene, "LightingProfile", py::arithmetic(),
             "Enum for conveniently setting lighting");
+    py::enum_<Open3DScene::UpDir> updir(
+            o3dscene, "UpDir", py::arithmetic(),
+            "Enum for specifying the up-direction of the model");
     lighting.value("HARD_SHADOWS", Open3DScene::LightingProfile::HARD_SHADOWS)
             .value("DARK_SHADOWS", Open3DScene::LightingProfile::DARK_SHADOWS)
             .value("MED_SHADOWS", Open3DScene::LightingProfile::MED_SHADOWS)
             .value("SOFT_SHADOWS", Open3DScene::LightingProfile::SOFT_SHADOWS)
             .value("NO_SHADOWS", Open3DScene::LightingProfile::NO_SHADOWS)
             .export_values();
+    updir.value("PLUS_Y", Open3DScene::UpDir::PLUS_Y)
+            .value("MINUS_Y", Open3DScene::UpDir::MINUS_Y)
+            .value("PLUS_Z", Open3DScene::UpDir::PLUS_Z)
+            .value("MINUS_Z", Open3DScene::UpDir::MINUS_Z);
 
     o3dscene.def(py::init<Renderer &>())
             .def("show_skybox", &Open3DScene::ShowSkybox,
@@ -566,10 +575,9 @@ void pybind_rendering_classes(py::module &m) {
             .def("show_ground_plane", &Open3DScene::ShowGroundPlane,
                  "Toggles display of ground plane")
             .def("set_lighting", &Open3DScene::SetLighting,
-                 "Sets a simple lighting model. set_lighting(profile, "
-                 "sun_dir). The default value is "
-                 "set_lighting(Open3DScene.LightingProfile.MED_SHADOWS, "
-                 "(0.577, -0.577, -0.577))")
+                 "Sets a simple lighting model. set_lighting(profile). "
+                 "The default value is "
+                 "Open3DScene.LightingProfile.MED_SHADOWS.")
             .def(
                     "set_background_color",
                     [](Open3DScene &scene, const Eigen::Vector4f &color) {
@@ -636,6 +644,10 @@ void pybind_rendering_classes(py::module &m) {
             .def_property_readonly("background_color",
                                    &Open3DScene::GetBackgroundColor,
                                    "The background color (read-only)")
+            .def_property("model_up", &Open3DScene::GetModelUp,
+                          &Open3DScene::SetModelUp,
+                          "Gets/sets the up-axis for the model. This affects "
+                          "preset lighting directions and the ground plane")
             .def_property("downsample_threshold",
                           &Open3DScene::GetDownsampleThreshold,
                           &Open3DScene::SetDownsampleThreshold,

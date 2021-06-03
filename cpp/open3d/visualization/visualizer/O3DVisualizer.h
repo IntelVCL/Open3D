@@ -29,6 +29,7 @@
 #include "open3d/visualization/gui/SceneWidget.h"
 #include "open3d/visualization/gui/Window.h"
 #include "open3d/visualization/rendering/Material.h"
+#include "open3d/visualization/rendering/Open3DScene.h"
 #include "open3d/visualization/rendering/Scene.h"
 #include "open3d/visualization/visualizer/O3DVisualizerSelections.h"
 
@@ -48,7 +49,6 @@ class Geometry;
 namespace visualization {
 
 namespace rendering {
-class Open3DScene;
 struct TriangleMeshModel;
 }  // namespace rendering
 
@@ -71,6 +71,8 @@ public:
         bool is_visible = true;
 
         // internal
+        bool has_normals = false;
+        bool has_colors = false;
         bool is_color_default = true;
     };
 
@@ -82,8 +84,8 @@ public:
         bool show_skybox = false;
         bool show_axes = false;
         bool show_ground = false;
-        rendering::Scene::GroundPlane ground_plane =
-                rendering::Scene::GroundPlane::XZ;
+        rendering::Open3DScene::UpDir up_dir =
+                rendering::Open3DScene::UpDir::PLUS_Y;
         bool is_animating = false;
         std::set<std::string> enabled_groups;
 
@@ -96,8 +98,9 @@ public:
         std::string ibl_path = "";  // "" is default path
         int ibl_intensity = 0;
         int sun_intensity = 100000;
-        Eigen::Vector3f sun_dir = {0.577f, -0.577f, -0.577f};
+        Eigen::Vector3f sun_dir = {0.0f, -1.0f, 0.0f};
         Eigen::Vector3f sun_color = {1.0f, 1.0f, 1.0f};
+        bool sun_follows_camera = false;
 
         double current_time = 0.0;   // seconds
         double time_step = 1.0;      // seconds
@@ -115,6 +118,9 @@ public:
 
     void SetShader(Shader shader);
 
+    void SetModelUp(rendering::Open3DScene::UpDir up_dir);
+    rendering::Open3DScene::UpDir GetModelUp() const;
+
     void AddGeometry(const std::string& name,
                      std::shared_ptr<geometry::Geometry3D> geom,
                      const rendering::Material* material = nullptr,
@@ -130,13 +136,14 @@ public:
                      bool is_visible = true);
 
     void AddGeometry(const std::string& name,
-                     std::shared_ptr<rendering::TriangleMeshModel> tgeom,
+                     std::shared_ptr<rendering::TriangleMeshModel> model,
                      const rendering::Material* material = nullptr,
                      const std::string& group = "",
                      double time = 0.0,
                      bool is_visible = true);
 
     void RemoveGeometry(const std::string& name);
+    void ClearGeometry();
 
     void ShowGeometry(const std::string& name, bool show);
 
@@ -162,7 +169,6 @@ public:
     void ShowSkybox(bool show);
     void ShowAxes(bool show);
     void ShowGround(bool show);
-    void SetGroundPlane(rendering::Scene::GroundPlane plane);
     void SetPointSize(int point_size);
     void SetLineWidth(int line_width);
     void EnableGroup(const std::string& group, bool enable);
@@ -202,6 +208,16 @@ public:
     void StopRPCInterface();
 
 protected:
+    struct MenuCustomization {
+        gui::Menu* menu;
+        int insertion_idx;
+    };
+    // CreatingAppMenu() is only useful on macOS.
+    MenuCustomization& GetAppMenu();
+    MenuCustomization& GetFileMenu();
+
+    void SetLightingProfile(rendering::Open3DScene::LightingProfile profile);
+
     void Layout(const gui::LayoutContext& context);
 
 private:

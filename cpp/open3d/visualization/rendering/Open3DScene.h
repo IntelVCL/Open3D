@@ -71,7 +71,12 @@ public:
     void SetBackground(const Eigen::Vector4f& color,
                        std::shared_ptr<geometry::Image> image = nullptr);
     const Eigen::Vector4f GetBackgroundColor() const;
-    void ShowGroundPlane(bool enable, Scene::GroundPlane plane);
+
+    enum class UpDir { PLUS_Y = 0, MINUS_Y, PLUS_Z, MINUS_Z };
+    void SetModelUp(UpDir dir);
+    UpDir GetModelUp() const;
+
+    void ShowGroundPlane(bool enable);
 
     enum class LightingProfile {
         HARD_SHADOWS,
@@ -81,7 +86,10 @@ public:
         NO_SHADOWS
     };
 
-    void SetLighting(LightingProfile profile, const Eigen::Vector3f& sun_dir);
+    /// Sets a lighting profile. The sun direction is set to be from the
+    /// upper left behind the viewer when facing the "front" of the model
+    /// (as deterimined be the model up-direction).
+    void SetLighting(LightingProfile profile);
 
     /// Sets the maximum number of points before AddGeometry also adds a
     /// downsampled point cloud with number of points, used when rendering
@@ -157,6 +165,8 @@ private:
     std::map<std::string, GeometryData> geometries_;  // name -> data
     geometry::AxisAlignedBoundingBox bounds_;
     size_t downsample_threshold_ = 6000000;
+    UpDir up_dir_ = UpDir::PLUS_Y;
+    bool show_ground_ = false;
 };
 
 }  // namespace rendering

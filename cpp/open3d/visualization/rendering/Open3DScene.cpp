@@ -122,7 +122,8 @@ Open3DScene::Open3DScene(Renderer& renderer) : renderer_(renderer) {
     view_ = scene->AddView(0, 0, 1, 1);
     SetBackground({1.0f, 1.0f, 1.0f, 1.0f});
 
-    SetLighting(LightingProfile::MED_SHADOWS, {0.577f, -0.577f, -0.577f});
+    SetLighting(LightingProfile::MED_SHADOWS);
+    SetModelUp(UpDir::PLUS_Y);
 
     RecreateAxis(scene, bounds_, false);
 }
@@ -179,13 +180,65 @@ const Eigen::Vector4f Open3DScene::GetBackgroundColor() const {
     return background_color;
 }
 
-void Open3DScene::ShowGroundPlane(bool enable, Scene::GroundPlane plane) {
+void Open3DScene::SetModelUp(UpDir dir) {
+    const float kInvRad3 = 1.0f / std::sqrt(3.0f);
+    const float kPi = float(M_PI);
+    // This resets sun and IBL direction so that the default IBL lights
+    // down from the "top" (that is, the light patch of the IBL texture is
+    // located up-dir from the origin) and the sun is from the upper left behind
+    // when facing the "front" of the model. (We could attempt to rotate such
+    // that user rotations are kept, but not only is it difficult to keep the
+    // IBL rotations from going haywire, it's not clear what that really means,
+    // since the IBL rotation was done with the previous up-dir. Just resetting
+    // the value seems cleaner all around.
+    //  +Y:  Suzanne, stanford bunny
+    //  -Y:  cactusgarden, fountain.ply when lit (Stanford dataset/Qianyi)
+    //  +Z:  David, Thinker, grand piano, sarcophagus cat (Scan the world)
+    //  -Z:  none known
     auto scene = renderer_.GetScene(scene_);
-    scene->EnableGroundPlane(enable, plane);
+    up_dir_ = dir;
+    rendering::Camera::Transform m;
+    switch (dir) {
+        case UpDir::PLUS_Y:
+            scene->SetSunLightDirection({kInvRad3, -kInvRad3, -kInvRad3});
+            m = rendering::Camera::Transform::Identity();
+            break;
+        case UpDir::MINUS_Y:
+            scene->SetSunLightDirection({kInvRad3, kInvRad3, kInvRad3});
+            m = Eigen::AngleAxisf(kPi, Eigen::Vector3f{1.0f, 0.0f, 0.0f});
+            break;
+        case UpDir::PLUS_Z:
+            scene->SetSunLightDirection({kInvRad3, kInvRad3, -kInvRad3});
+            m = Eigen::AngleAxisf(kPi, Eigen::Vector3f{1.0f, 0.0f, 0.0f});
+            break;
+        case UpDir::MINUS_Z:
+            scene->SetSunLightDirection({kInvRad3, kInvRad3, kInvRad3});
+            m = Eigen::AngleAxisf(kPi, Eigen::Vector3f{1.0f, 0.0f, 0.0f});
+            break;
+    }
+    scene->SetIndirectLightRotation(m);
+
+    ShowGroundPlane(show_ground_);
 }
 
-void Open3DScene::SetLighting(LightingProfile profile,
-                              const Eigen::Vector3f& sun_dir) {
+Open3DScene::UpDir Open3DScene::GetModelUp() const { return up_dir_; }
+
+void Open3DScene::ShowGroundPlane(bool enable) {
+    show_ground_ = enable;
+    auto scene = renderer_.GetScene(scene_);
+    switch (up_dir_) {
+        case UpDir::PLUS_Y:
+        case UpDir::MINUS_Y:
+            scene->EnableGroundPlane(enable, Scene::GroundPlane::XZ);
+            break;
+        case UpDir::PLUS_Z:
+        case UpDir::MINUS_Z:
+            scene->EnableGroundPlane(enable, Scene::GroundPlane::XY);
+            break;
+    }
+}
+
+void Open3DScene::SetLighting(LightingProfile profile) {
     auto scene = renderer_.GetScene(scene_);
 
     if (profile != LightingProfile::HARD_SHADOWS) {
@@ -196,6 +249,7 @@ void Open3DScene::SetLighting(LightingProfile profile,
     }
 
     Eigen::Vector3f sun_color(1.0f, 1.0f, 1.0f);
+    Eigen::Vector3f sun_dir(0.577f, 0.577f, 0.577f);  // dummy value
 
     // These intensities have been chosen so that a white object on a white
     // background is clearly visible even when the highlight is next to the
@@ -205,33 +259,36 @@ void Open3DScene::SetLighting(LightingProfile profile,
         case LightingProfile::HARD_SHADOWS:
             scene->EnableIndirectLight(false);
             scene->EnableSunLight(true);
-            scene->SetSunLight(sun_dir, sun_color, 100000);
+            scene->SetSunLight(sun_dir, sun_color, 200000);
             break;
         case LightingProfile::DARK_SHADOWS:
             scene->EnableIndirectLight(true);
             scene->EnableSunLight(true);
-            scene->SetIndirectLightIntensity(5000);
-            scene->SetSunLight(sun_dir, sun_color, 85000);
+            scene->SetIndirectLightIntensity(6500);
+            scene->SetSunLight(sun_dir, sun_color, 150000);
             break;
         default:
         case LightingProfile::MED_SHADOWS:
             scene->EnableIndirectLight(true);
             scene->EnableSunLight(true);
-            scene->SetIndirectLightIntensity(7500);
-            scene->SetSunLight(sun_dir, sun_color, 70000);
+            scene->SetIndirectLightIntensity(12500);
+            scene->SetSunLight(sun_dir, sun_color, 125000);
             break;
         case LightingProfile::SOFT_SHADOWS:
             scene->EnableIndirectLight(true);
             scene->EnableSunLight(true);
-            scene->SetIndirectLightIntensity(15000);
-            scene->SetSunLight(sun_dir, sun_color, 35000);
+            scene->SetIndirectLightIntensity(20000);
+            scene->SetSunLight(sun_dir, sun_color, 90000);
             break;
         case LightingProfile::NO_SHADOWS:
             scene->EnableIndirectLight(true);
-            scene->SetIndirectLightIntensity(20000);
+            scene->SetIndirectLightIntensity(35000);
             scene->EnableSunLight(false);
             break;
     }
+    // We set the sun color and intensity above, now we need to set the
+    // correct direction.
+    SetModelUp(up_dir_);
 }
 
 void Open3DScene::ClearGeometry() {
