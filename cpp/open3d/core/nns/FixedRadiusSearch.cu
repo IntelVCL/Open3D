@@ -27,7 +27,9 @@
 #include <math.h>
 
 #include <cub/cub.cuh>
+#include <moderngpu/kernel_segsort.hxx>
 
+#include "open3d/core/CUDAUtils.h"
 #include "open3d/core/nns/FixedRadiusSearch.h"
 #include "open3d/core/nns/MemoryAllocation.h"
 #include "open3d/core/nns/NeighborSearchCommon.h"
@@ -75,6 +77,42 @@ inline __device__ bool NeighborTest(const Vec3<T>& p1,
     }
     result = *dist <= threshold;
     return result;
+}
+
+template <class T>
+inline __device__ void swap(T* x, T* y) {
+    T tmp = *x;
+    *x = *y;
+    *y = tmp;
+}
+
+template <class T>
+inline __device__ void heapify(T* dist, int64_t* idx, int index, int k) {
+    int root = index;
+    int child = root * 2 + 1;
+
+    while (child < k) {
+        if (child + 1 < k && dist[child + 1] > dist[child]) {
+            child++;
+        }
+        if (dist[root] > dist[child]) {
+            return;
+        }
+        swap<T>(&dist[root], &dist[child]);
+        swap<int64_t>(&idx[root], &idx[child]);
+        root = child;
+        child = root * 2 + 1;
+    }
+}
+
+template <class T>
+__device__ void heap_sort(T* dist, int64_t* idx, int k) {
+    int i;
+    for (i = k - 1; i > 0; i--) {
+        swap<T>(&dist[0], &dist[i]);
+        swap<int64_t>(&idx[0], &idx[i]);
+        heapify(dist, idx, 0, i);
+    }
 }
 
 /// Kernel for CountHashTableEntries
@@ -357,8 +395,6 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
     int query_idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (query_idx >= num_queries) return;
 
-    int count = 0;  // counts the number of neighbors for this query point
-
     size_t indices_offset = neighbors_row_splits[query_idx];
 
     Vec3<T> query_pos(query_points[query_idx * 3 + 0],
@@ -389,6 +425,7 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
         }
     }
 
+    int count = 0;  // counts the number of neighbors for this query point
     for (int bin_i = 0; bin_i < 8; ++bin_i) {
         int bin = bins_to_visit[bin_i];
         if (bin == -1) break;
@@ -403,10 +440,8 @@ __global__ void WriteNeighborsIndicesAndDistancesKernel(
 
             T dist;
             if (NeighborTest<METRIC>(p, query_pos, &dist, threshold)) {
+                distances[indices_offset + count] = dist;
                 indices[indices_offset + count] = idx;
-                if (RETURN_DISTANCES) {
-                    distances[indices_offset + count] = dist;
-                }
                 ++count;
             }
         }
@@ -525,13 +560,18 @@ __global__ void WriteNeighborsHybridKernel(
         const T inv_voxel_size,
         const T radius,
         const T threshold,
-        const int max_knn) {
+        const int max_knn,
+        int shared_memory) {
     int query_idx = blockDim.x * blockIdx.x + threadIdx.x;
     if (query_idx >= num_queries) return;
 
-    int count = 0;  // counts the number of neighbors for this query point
-
     size_t indices_offset = max_knn * query_idx;
+    extern __shared__ __align__(sizeof(T)) unsigned char _shared_mem[];
+    T* distance_shared =
+            reinterpret_cast<T*>(_shared_mem) + max_knn * threadIdx.x;
+
+    T* distance_ptr =
+            shared_memory > 0 ? distance_shared : distances + indices_offset;
 
     Vec3<T> query_pos(query_points[query_idx * 3 + 0],
                       query_points[query_idx * 3 + 1],
@@ -563,7 +603,7 @@ __global__ void WriteNeighborsHybridKernel(
 
     int max_index;
     T max_value;
-
+    int count = 0;  // counts the number of neighbors for this query point
     for (int bin_i = 0; bin_i < 8; ++bin_i) {
         int bin = bins_to_visit[bin_i];
         if (bin == -1) break;
@@ -581,7 +621,7 @@ __global__ void WriteNeighborsHybridKernel(
                 // If count if less than max_knn, record idx and dist.
                 if (count < max_knn) {
                     indices[indices_offset + count] = idx;
-                    distances[indices_offset + count] = dist;
+                    distance_ptr[count] = dist;
                     // Update max_index and max_value.
                     if (count == 0 || max_value < dist) {
                         max_index = count;
@@ -594,14 +634,14 @@ __global__ void WriteNeighborsHybridKernel(
                     if (max_value > dist) {
                         // Replace idx and dist at current max_index.
                         indices[indices_offset + max_index] = idx;
-                        distances[indices_offset + max_index] = dist;
+                        distance_ptr[max_index] = dist;
                         // Update max_value
                         max_value = dist;
                         // Find max_index.
                         for (auto k = 0; k < max_knn; ++k) {
-                            if (distances[indices_offset + k] > max_value) {
+                            if (distance_ptr[k] > max_value) {
                                 max_index = k;
-                                max_value = distances[indices_offset + k];
+                                max_value = distance_ptr[k];
                             }
                         }
                     }
@@ -610,21 +650,20 @@ __global__ void WriteNeighborsHybridKernel(
         }
     }
 
+    // write count
     counts[query_idx] = count;
 
-    // bubble sort
-    for (int i = 0; i < count - 1; ++i) {
-        for (int j = 0; j < count - i - 1; ++j) {
-            if (distances[indices_offset + j] >
-                distances[indices_offset + j + 1]) {
-                T dist_tmp = distances[indices_offset + j];
-                int64_t ind_tmp = indices[indices_offset + j];
-                distances[indices_offset + j] =
-                        distances[indices_offset + j + 1];
-                indices[indices_offset + j] = indices[indices_offset + j + 1];
-                distances[indices_offset + j + 1] = dist_tmp;
-                indices[indices_offset + j + 1] = ind_tmp;
-            }
+    // heap sort
+    for (int i = (count / 2) - 1; i > -1; i--) {
+        heapify(distance_ptr, indices + indices_offset, i, count);
+    }
+    heap_sort(distance_ptr, indices + indices_offset, count);
+    for (auto i = 0; i < max_knn; ++i) {
+        if (i < count) {
+            distances[indices_offset + i] = distance_ptr[i];
+        } else {
+            distances[indices_offset + i] = 0;
+            indices[indices_offset + i] = -1;
         }
     }
 }
@@ -689,21 +728,32 @@ void WriteNeighborsHybrid(const cudaStream_t& stream,
                           const bool return_distances) {
     const T threshold = (metric == L2 ? radius * radius : radius);
 
-    const int BLOCKSIZE = 64;
+    const int BLOCKSIZE = 32;
     dim3 block(BLOCKSIZE, 1, 1);
     dim3 grid(0, 1, 1);
     grid.x = utility::DivUp(num_queries, block.x);
+
+    int max_shared_memory = GetCUDACurrentDeviceMaxSharedMemoryPerBlock();
+    int req_shared_memory = BLOCKSIZE * max_knn * sizeof(T);
+    int shared_memory =
+            max_shared_memory > req_shared_memory ? req_shared_memory : 0;
 
     if (grid.x) {
 #define FN_PARAMETERS                                                      \
     indices, distances, counts, point_index_table, hash_table_cell_splits, \
             hash_table_cell_splits_size - 1, query_points, num_queries,    \
-            points, inv_voxel_size, radius, threshold, max_knn
+            points, inv_voxel_size, radius, threshold, max_knn, shared_memory
 
 #define CALL_TEMPLATE(METRIC, RETURN_DISTANCES)                     \
     if (METRIC == metric && RETURN_DISTANCES == return_distances) { \
-        WriteNeighborsHybridKernel<T, METRIC, RETURN_DISTANCES>     \
-                <<<grid, block, 0, stream>>>(FN_PARAMETERS);        \
+        if (max_shared_memory > req_shared_memory) {                \
+            WriteNeighborsHybridKernel<T, METRIC, RETURN_DISTANCES> \
+                    <<<grid, block, req_shared_memory, stream>>>(   \
+                            FN_PARAMETERS);                         \
+        } else {                                                    \
+            WriteNeighborsHybridKernel<T, METRIC, RETURN_DISTANCES> \
+                    <<<grid, block, 0, stream>>>(FN_PARAMETERS);    \
+        }                                                           \
     }
 
 #define CALL_TEMPLATE2(METRIC)  \
@@ -822,48 +872,16 @@ void BuildSpatialHashTableCUDA(void* temp,
 }
 
 template <class T>
-void SortPairs(void* temp,
-               size_t& temp_size,
-               int64_t num_indices,
+void SortPairs(int64_t num_indices,
                int64_t num_segments,
                const int64_t* query_neighbors_row_splits,
-               int64_t* indices_unsorted,
-               T* distances_unsorted,
-               int64_t* indices_sorted,
-               T* distances_sorted) {
-    const bool get_temp_size = !temp;
-    int texture_alignment = 512;
+               int64_t* indices,
+               T* distances) {
+    mgpu::standard_context_t context(/*print_prop*/ false);
 
-    if (get_temp_size) {
-        temp = (char*)1;  // worst case pointer alignment
-        temp_size = std::numeric_limits<int64_t>::max();
-    }
-
-    MemoryAllocation mem_temp(temp, temp_size, texture_alignment);
-
-    std::pair<void*, size_t> sort_temp(nullptr, 0);
-
-    cub::DeviceSegmentedRadixSort::SortPairs(
-            sort_temp.first, sort_temp.second, distances_unsorted,
-            distances_sorted, indices_unsorted, indices_sorted, num_indices,
-            num_segments, query_neighbors_row_splits,
-            query_neighbors_row_splits + 1);
-    sort_temp = mem_temp.Alloc(sort_temp.second);
-
-    if (!get_temp_size) {
-        cub::DeviceSegmentedRadixSort::SortPairs(
-                sort_temp.first, sort_temp.second, distances_unsorted,
-                distances_sorted, indices_unsorted, indices_sorted, num_indices,
-                num_segments, query_neighbors_row_splits,
-                query_neighbors_row_splits + 1);
-    }
-    mem_temp.Free(sort_temp);
-
-    if (get_temp_size) {
-        // return the memory peak as the required temporary memory size.
-        temp_size = mem_temp.MaxUsed();
-        return;
-    }
+    mgpu::segmented_sort(distances, indices, num_indices,
+                         query_neighbors_row_splits + 1, num_segments,
+                         mgpu::less_t<T>(), context);
 }
 
 template <class T>
@@ -981,7 +999,8 @@ void FixedRadiusSearchCUDA(void* temp,
         T* distances_ptr;
 
         output_allocator.AllocIndices(&indices_ptr, num_indices);
-        output_allocator.AllocDistances(&distances_ptr, num_indices);
+        output_allocator.AllocDistances(&distances_ptr, num_indices,
+                                        std::numeric_limits<T>::max());
         for (int i = 0; i < batch_size; ++i) {
             const size_t hash_table_size =
                     hash_table_splits[i + 1] - hash_table_splits[i];
@@ -1092,25 +1111,17 @@ template void BuildSpatialHashTableCUDA(
         int64_t* hash_table_cell_splits,
         int64_t* hash_table_index);
 
-template void SortPairs(void* temp,
-                        size_t& temp_size,
-                        int64_t num_indices,
+template void SortPairs(int64_t num_indices,
                         int64_t num_segments,
                         const int64_t* query_neighbors_row_splits,
-                        int64_t* indices_unsorted,
-                        float* distances_unsorted,
-                        int64_t* indices_sorted,
-                        float* distances_sorted);
+                        int64_t* indices,
+                        float* distances);
 
-template void SortPairs(void* temp,
-                        size_t& temp_size,
-                        int64_t num_indices,
+template void SortPairs(int64_t num_indices,
                         int64_t num_segments,
                         const int64_t* query_neighbors_row_splits,
-                        int64_t* indices_unsorted,
-                        double* distances_unsorted,
-                        int64_t* indices_sorted,
-                        double* distances_sorted);
+                        int64_t* indices,
+                        double* distances);
 
 template void FixedRadiusSearchCUDA(
         void* temp,

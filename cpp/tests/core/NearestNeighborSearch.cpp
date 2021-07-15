@@ -29,6 +29,7 @@
 #include <cmath>
 #include <limits>
 
+#include "open3d/core/CUDAUtils.h"
 #include "open3d/core/Dtype.h"
 #include "open3d/core/SizeVector.h"
 #include "open3d/geometry/PointCloud.h"
@@ -205,5 +206,46 @@ TEST_P(NNSPermuteDevicesWithFaiss, HybridSearch) {
     ExpectEQ(counts.ToFlatVector<int64_t>(), std::vector<int64_t>({2}));
 }
 
+TEST_P(NNSPermuteDevicesWithFaiss, HybridSearchLarge) {
+    // Set up nns.
+    int64_t size = (1ULL << 12) + 10;
+#ifdef BUILD_CUDA_MODULE
+    int max_shared_memory = core::GetCUDACurrentDeviceMaxSharedMemoryPerBlock();
+#else
+    // Use a default value to make this test work for CPU only builds.
+    int max_shared_memory = 48 * 1024;
+#endif
+    int block_size = 32;
+    double radius = 0.1;
+
+    // Calculate the max_knn value that requires more memory than available
+    // shared memory.
+    int max_knn = max_shared_memory / block_size / sizeof(float) + 10;
+
+    core::Device device = GetParam();
+
+    core::Tensor ref = core::Tensor::Arange(0.0, size * 3.0, 1.0,
+                                            core::Dtype::Float32, device)
+                               .Reshape({size, 3});
+    core::Tensor query = ref.To(device, /*copy*/ true);
+
+    core::nns::NearestNeighborSearch nns(ref);
+
+    nns.HybridIndex(radius);
+
+    core::Tensor indices, distances, counts;
+    std::tie(indices, distances, counts) =
+            nns.HybridSearch(query, radius, max_knn);
+
+    core::SizeVector shape{size, max_knn};
+    std::vector<int64_t> gt_index_slice(size, 0);
+    std::iota(std::begin(gt_index_slice), std::end(gt_index_slice), 0);
+    std::vector<float> gt_distance_slice(size, 0);
+
+    ExpectEQ(indices.GetShape(), shape);
+    ExpectEQ(indices.Slice(1, 0, 1).ToFlatVector<int64_t>(), gt_index_slice);
+    ExpectEQ(distances.GetShape(), shape);
+    ExpectEQ(distances.Slice(1, 0, 1).ToFlatVector<float>(), gt_distance_slice);
+}
 }  // namespace tests
 }  // namespace open3d
