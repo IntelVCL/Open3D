@@ -28,6 +28,7 @@
 
 #include <cub/cub.cuh>
 
+#include "open3d/core/CUDAUtils.h"
 #include "open3d/core/nns/FixedRadiusSearch.h"
 #include "open3d/core/nns/MemoryAllocation.h"
 #include "open3d/core/nns/NeighborSearchCommon.h"
