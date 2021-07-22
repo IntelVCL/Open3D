@@ -73,12 +73,31 @@ jobs:
           sudo mv ccache /usr/local/bin
           ccache -M 2G  # See .github/workflows/readme.md for ccache strategy.
 
+      - name: Initialize CodeQL
+        if: matrix.CONFIG=='ON'
+        uses: github/codeql-action/init@v1
+        with:
+          languages: cpp, python, javascript
+          queries: security-and-quality
+
       - name: Config and build
         run: |
           PATH=/usr/lib/ccache:$PATH
           ccache -s
           ./util/run_ci.sh
           ccache -s
+
+      - name: Prepare for CodeQL
+        if: matrix.CONFIG=='ON'
+        run: |
+          echo "Clean folders to prevent duplicate CodeQL alerts"
+          set -x
+          rm -rf build/lib/python_package
+
+      - name: Perform CodeQL Analysis
+        if: matrix.CONFIG=='ON'
+        uses: github/codeql-action/analyze@v1
+
 
   build-wheel:
     name: Build wheel
