@@ -115,7 +115,7 @@ static std::vector<std::pair<int, int>> AdvancedMatching(
             }
         }
     }
-    utility::LogDebug("points are remained : %d", (int)corres_cross.size());
+    utility::LogDebug("points are remained : {:d}", (int)corres_cross.size());
 
     // STEP 3) TUPLE CONSTRAINT
     utility::LogDebug("\t[tuple constraint] ");
@@ -125,11 +125,12 @@ static std::vector<std::pair<int, int>> AdvancedMatching(
     int ncorr = static_cast<int>(corres_cross.size());
     int number_of_trial = ncorr * 100;
 
+    utility::UniformRandInt dist_gen(0, ncorr - 1, option.seed_);
     std::vector<std::pair<int, int>> corres_tuple;
     for (i = 0; i < number_of_trial; i++) {
-        rand0 = utility::UniformRandInt(0, ncorr - 1);
-        rand1 = utility::UniformRandInt(0, ncorr - 1);
-        rand2 = utility::UniformRandInt(0, ncorr - 1);
+        rand0 = dist_gen();
+        rand1 = dist_gen();
+        rand2 = dist_gen();
         idi0 = corres_cross[rand0].first;
         idj0 = corres_cross[rand0].second;
         idi1 = corres_cross[rand1].first;
