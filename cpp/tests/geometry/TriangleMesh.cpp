@@ -2211,5 +2211,45 @@ TEST(TriangleMesh, CreateMeshCoordinateFrame) {
     ExpectEQ(center_frame->GetCenter(), z_center);
 }
 
+TEST(TriangleMesh, IsOriented) {
+    // A tetrahedron
+    Eigen::Vector3d A(0, 0, 0);  // 0
+    Eigen::Vector3d B(1, 0, 0);  // 1
+    Eigen::Vector3d C(0, 1, 0);  // 2
+    Eigen::Vector3d D(0, 0, 1);  // 3
+    geometry::TriangleMesh tm;
+    tm.vertices_ = {A, B, C, D};
+
+    tm.triangles_ = {Eigen::Vector3i(0, 3, 1), Eigen::Vector3i(0, 1, 2),
+                     Eigen::Vector3i(1, 3, 2), Eigen::Vector3i(2, 3, 0)};
+    EXPECT_TRUE(tm.IsOriented());
+
+    tm.triangles_ = {Eigen::Vector3i(0, 1, 3), Eigen::Vector3i(0, 1, 2),
+                     Eigen::Vector3i(1, 3, 2), Eigen::Vector3i(2, 3, 0)};
+    EXPECT_FALSE(tm.IsOriented());
+
+    tm.triangles_ = {Eigen::Vector3i(0, 1, 3), Eigen::Vector3i(0, 2, 1),
+                     Eigen::Vector3i(3, 1, 2), Eigen::Vector3i(2, 0, 3)};
+    EXPECT_TRUE(tm.IsOriented());
+}
+
+TEST(TriangleMesh, IsOrientable) {
+    EXPECT_TRUE(geometry::TriangleMesh::CreateSphere()->IsOrientable());
+    EXPECT_FALSE(geometry::TriangleMesh::CreateMoebius()->IsOrientable());
+    EXPECT_TRUE(geometry::TriangleMesh::CreateTorus()->IsOrientable());
+
+    // A non-manifold edge mesh
+    Eigen::Vector3d A(0, 0, 0);   // 0
+    Eigen::Vector3d B(1, 0, 0);   // 1
+    Eigen::Vector3d C(0, 1, 0);   // 2
+    Eigen::Vector3d D(0, 0, 1);   // 3
+    Eigen::Vector3d E(0, 0, -1);  // 4
+    geometry::TriangleMesh tm;
+    tm.vertices_ = {A, B, C, D, E};
+    tm.triangles_ = {Eigen::Vector3i(0, 1, 2), Eigen::Vector3i(0, 1, 3),
+                     Eigen::Vector3i(0, 1, 4)};
+    EXPECT_FALSE(tm.IsOrientable());
+}
+
 }  // namespace tests
 }  // namespace open3d
