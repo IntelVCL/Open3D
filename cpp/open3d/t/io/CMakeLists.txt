@@ -5,11 +5,13 @@ target_sources(tio PRIVATE
     NumpyIO.cpp
     PointCloudIO.cpp
     TriangleMeshIO.cpp
+    TSDFVoxelGridIO.cpp
 )
 
 target_sources(tio PRIVATE
-    file_format/FileJPG.cpp
+    file_format/FileXYZI.cpp
     file_format/FilePLY.cpp
+    file_format/FileJPG.cpp
     file_format/FilePNG.cpp
     file_format/FilePTS.cpp
     file_format/FileXYZI.cpp
