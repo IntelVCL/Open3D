@@ -31,6 +31,7 @@
 #include <tuple>
 #include <vector>
 
+#include "open3d/geometry/BoundingVolume.h"
 #include "open3d/geometry/Geometry3D.h"
 #include "open3d/geometry/KDTreeSearchParam.h"
 
@@ -46,6 +47,7 @@ class Image;
 class RGBDImage;
 class TriangleMesh;
 class VoxelGrid;
+class BoundingConvexHull;
 
 /// \class PointCloud
 ///
@@ -189,6 +191,16 @@ public:
     ///
     /// \param bbox OrientedBoundingBox to crop points.
     std::shared_ptr<PointCloud> Crop(const OrientedBoundingBox &bbox) const;
+
+    /// \brief Function to crop pointcloud into output pointcloud
+    ///
+    /// All points with coordinates outside the convex hull of \p mesh are
+    /// clipped.
+    ///
+    /// \param mesh TriangleMesh to crop points.
+    /// \param invert Invert selection
+    std::shared_ptr<PointCloud> CropConvexHull(const BoundingConvexHull &bhull,
+                                               bool invert = false) const;
 
     /// \brief Function to remove points that have less than \p nb_points in a
     /// sphere of a given radius.
