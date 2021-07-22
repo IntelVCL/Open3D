@@ -29,6 +29,7 @@
 #include <Eigen/Eigenvalues>
 #include <numeric>
 
+#include "BoundingVolume.h"
 #include "open3d/geometry/PointCloud.h"
 #include "open3d/geometry/Qhull.h"
 #include "open3d/geometry/TriangleMesh.h"
@@ -270,9 +271,15 @@ AxisAlignedBoundingBox& AxisAlignedBoundingBox::operator+=(
         min_bound_ = other.min_bound_;
         max_bound_ = other.max_bound_;
     } else if (!other.IsEmpty()) {
-        min_bound_ = min_bound_.array().min(other.min_bound_.array()).matrix();
-        max_bound_ = max_bound_.array().max(other.max_bound_.array()).matrix();
+        Join(other);
     }
+    return *this;
+}
+
+AxisAlignedBoundingBox& AxisAlignedBoundingBox::Join(
+        const AxisAlignedBoundingBox& other) {
+    min_bound_ = min_bound_.array().min(other.min_bound_.array()).matrix();
+    max_bound_ = max_bound_.array().max(other.max_bound_.array()).matrix();
     return *this;
 }
 
