@@ -517,6 +517,12 @@ public:
                     DeformAsRigidAsPossibleEnergy::Spokes,
             double smoothed_alpha = 0.01) const;
 
+    /// \brief This function fills in holes in the mesh to make it watertight
+    /// based on the approach described by Hu, Wang, Li and Lio, "Filling Holes
+    /// in Triangular Meshes in Engineering", 2012.
+    /// \return A watertight TriangleMesh.
+    std::shared_ptr<TriangleMesh> FillHoles();
+
     /// \brief Alpha shapes are a generalization of the convex hull. With
     /// decreasing alpha value the shape schrinks and creates cavities.
     /// See Edelsbrunner and Muecke, "Three-Dimensional Alpha Shapes", 1994.

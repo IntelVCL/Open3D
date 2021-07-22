@@ -380,5 +380,9 @@ template Eigen::Matrix3d ComputeCovariance(
 template std::tuple<Eigen::Vector3d, Eigen::Matrix3d> ComputeMeanAndCovariance(
         const std::vector<Eigen::Vector3d> &points,
         const std::vector<int> &indices);
+
+double ComputeAcuteAngle(const Eigen::Vector3d &v0, const Eigen::Vector3d &v1) {
+    return std::atan2(v0.cross(v1).norm(), v0.dot(v1));
+}
 }  // namespace utility
 }  // namespace open3d

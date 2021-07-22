@@ -314,6 +314,11 @@ void pybind_trianglemesh(py::module &m) {
                  "max_iter"_a,
                  "energy"_a = MeshBase::DeformAsRigidAsPossibleEnergy::Spokes,
                  "smoothed_alpha"_a = 0.01)
+            .def("fill_holes", &TriangleMesh::FillHoles,
+                 "Fills in holes in the mesh to make it watertight based on "
+                 "the advancing front mesh (AFM) technique. See Zhao, Gao and "
+                 "Lin, \"A robust hole-filling algorithm for triangular "
+                 "mesh\", 2007.")
             .def_static(
                     "create_from_point_cloud_alpha_shape",
                     [](const PointCloud &pcd, double alpha) {
@@ -655,6 +660,7 @@ void pybind_trianglemesh(py::module &m) {
              {"smoothed_alpha",
               "trade-off parameter for the smoothed energy functional for the "
               "regularization term."}});
+    docstring::ClassMethodDocInject(m, "TriangleMesh", "fill_holes");
     docstring::ClassMethodDocInject(
             m, "TriangleMesh", "create_from_point_cloud_alpha_shape",
             {{"pcd",
